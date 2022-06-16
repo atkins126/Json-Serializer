@@ -26,7 +26,7 @@ unit clJsonSerializerBase;
 interface
 
 uses
-  System.Classes, System.SysUtils, System.Generics.Collections, System.Rtti, System.TypInfo;
+  Classes, SysUtils, Rtti, TypInfo;
 
 type
   EclJsonSerializerError = class(Exception)
@@ -42,19 +42,7 @@ type
 
   TclJsonStringAttribute = class(TclJsonPropertyAttribute);
 
-  TclJsonMapAttribute = class(TclJsonPropertyAttribute);
-
-  TclJsonListAttribute = class(TclJsonPropertyAttribute);
-
   TclJsonRequiredAttribute = class(TCustomAttribute);
-
-  TclJsonEnumNamesAttribute = class (TCustomAttribute)
-  strict private
-    FNames: TArray<string>;
-  public
-    constructor Create(const ANames: string);
-    property Names: TArray<string> read FNames;
-  end;
 
   TclJsonTypeNameMapAttribute = class(TCustomAttribute)
   strict private
@@ -94,14 +82,6 @@ begin
   FPropertyName := APropertyName;
   FTypeName := ATypeName;
   FTypeClassName := ATypeClassName;
-end;
-
-{ TclJsonEnumNamesAttribute }
-
-constructor TclJsonEnumNamesAttribute.Create(const ANames: string);
-begin
-  inherited Create();
-  FNames := ANames.Split([',']);
 end;
 
 end.

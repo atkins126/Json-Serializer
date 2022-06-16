@@ -26,48 +26,37 @@ unit clJsonSerializer;
 interface
 
 uses
-  System.Classes, System.SysUtils, System.Generics.Collections, System.Rtti, System.TypInfo, clJsonSerializerBase, clJsonParser;
+  Classes, Generics.Collections, SysUtils, Rtti, TypInfo, clJsonSerializerBase, clJsonParser;
 
 type
   TclJsonTypeNameMapAttributeList = TArray<TclJsonTypeNameMapAttribute>;
 
   TclJsonSerializer = class(TclJsonSerializerBase)
   strict private
+    class function GetArrayElementType(ATypeInfo: PTypeInfo): PPTypeInfo; static;
+    class function GetDataClass(ATypeInfo: PTypeInfo): TClass; static;
+
     procedure GetTypeAttributes(AType: TRttiType; var ATypeNameAttrs: TclJsonTypeNameMapAttributeList);
     procedure GetPropertyAttributes(AProp: TRttiProperty; var APropAttr: TclJsonPropertyAttribute;
       var ARequiredAttr: TclJsonRequiredAttribute);
     function GetObjectClass(ATypeNameAttrs: TclJsonTypeNameMapAttributeList; AJsonObject: TclJSONObject): TRttiType;
-    function EnumNameToTValue(const Name: string; AProperty: TRttiProperty; EnumType: PTypeInfo): TValue;
-    function EnumTValueToName(AValue: TValue; AProperty: TRttiProperty): string;
+    function EnumNameToTValue(Name: string; EnumType: PTypeInfo): TValue;
 
     procedure SerializeArray(AProperty: TRttiProperty; AObject: TObject;
       Attribute: TclJsonPropertyAttribute; AJson: TclJsonObject);
-    procedure SerializeMap(AProperty: TRttiProperty; AObject: TObject;
-      Attribute: TclJsonPropertyAttribute; AJson: TclJsonObject);
-    procedure SerializeList(AProperty: TRttiProperty; AObject: TObject;
-      Attribute: TclJsonPropertyAttribute; AJson: TclJsonObject);
-
     procedure DeserializeArray(AProperty: TRttiProperty; AObject: TObject; AJsonArray: TclJSONArray);
-    procedure DeserializeMap(AProperty: TRttiProperty; AObject: TObject; AJsonObject: TclJSONObject);
-    procedure DeserializeList(AProperty: TRttiProperty; AObject: TObject; AJsonArray: TclJSONArray);
 
-    function Deserialize(ATypeInfo: PTypeInfo; const AJson: TclJSONObject): TObject; overload;
     function Deserialize(AType: TClass; const AJson: TclJSONObject): TObject; overload;
     function Deserialize(AObject: TObject; const AJson: TclJSONObject): TObject; overload;
     function Serialize(AObject: TObject): TclJSONObject;
-  strict protected
-    procedure SortMapKeys(var AKeyArray: TValue); virtual;
   public
     function JsonToObject(AType: TClass; const AJson: string): TObject; overload; override;
     function JsonToObject(AObject: TObject; const AJson: string): TObject; overload; override;
-    function JsonToObject<T>(const AJson: string): T; overload;
     function ObjectToJson(AObject: TObject): string; override;
   end;
 
 resourcestring
   cUnsupportedDataType = 'Unsupported data type';
-  cDictionaryRequired = 'Dictionary type is required to serialize object maps';
-  cObjectListRequired = 'ObjectList type is required to serialize object arrays';
   cNonSerializable = 'The object is not serializable';
 
 implementation
@@ -101,45 +90,10 @@ begin
   end;
 end;
 
-function TclJsonSerializer.Deserialize(ATypeInfo: PTypeInfo; const AJson: TclJSONObject): TObject;
-var
-  ctx: TRttiContext;
-  lType, rType: TRttiType;
-  instType: TRttiInstanceType;
-  rValue: TValue;
-  typeNameAttrs: TclJsonTypeNameMapAttributeList;
-begin
-  Result := nil;
-  if (AJson.Count = 0) then Exit;
-
-  ctx := TRttiContext.Create();
-  try
-    rType := ctx.GetType(ATypeInfo);
-
-    GetTypeAttributes(rType, typeNameAttrs);
-    lType := GetObjectClass(typeNameAttrs, AJson);
-    if (lType = nil) then
-    begin
-      lType := rType;
-    end;
-    instType := lType.AsInstance;
-    rValue := instType.GetMethod('Create').Invoke(instType.MetaclassType, []);
-
-    Result := rValue.AsObject();
-    try
-      Result := Deserialize(Result, AJson);
-    except
-      Result.Free();
-      raise;
-    end;
-  finally
-    ctx.Free();
-  end;
-end;
-
 procedure TclJsonSerializer.DeserializeArray(AProperty: TRttiProperty;
   AObject: TObject; AJsonArray: TclJSONArray);
 var
+  pElType: PPTypeInfo;
   elType: PTypeInfo;
   len: NativeInt;
   pArr: Pointer;
@@ -150,9 +104,10 @@ begin
   len := AJsonArray.Count;
   if (len = 0) then Exit;
 
-  if (GetTypeData(AProperty.PropertyType.Handle).DynArrElType = nil) then Exit;
+  pElType := GetArrayElementType(AProperty.PropertyType.Handle);
+  if (pElType = nil) then Exit;
 
-  elType := GetTypeData(AProperty.PropertyType.Handle).DynArrElType^;
+  elType := pElType^;
 
   pArr := nil;
 
@@ -160,12 +115,12 @@ begin
   try
     TValue.Make(@pArr, AProperty.PropertyType.Handle, rValue);
 
-    for i := 0 to len - 1 do
+    for i := 0 to AJsonArray.Count - 1 do
     begin
       if (elType.Kind = tkClass)
         and (AJsonArray.Items[i] is TclJSONObject) then
       begin
-        objClass := elType.TypeData.ClassType;
+        objClass := GetDataClass(elType);
         rItemValue := Deserialize(objClass, TclJSONObject(AJsonArray.Items[i]));
       end else
       if (elType.Kind in [tkString, tkLString, tkWString, tkUString]) then
@@ -189,7 +144,7 @@ begin
       if (elType.Kind = tkEnumeration)
         and (AJsonArray.Items[i] is TclJSONValue) then
       begin
-        rItemValue := EnumNameToTValue(AJsonArray.Items[i].ValueString, AProperty, elType);
+        rItemValue := EnumNameToTValue(AJsonArray.Items[i].ValueString, elType);
       end else
       begin
         raise EclJsonSerializerError.Create(cUnsupportedDataType);
@@ -204,160 +159,12 @@ begin
   end;
 end;
 
-procedure TclJsonSerializer.DeserializeList(AProperty: TRttiProperty; AObject: TObject; AJsonArray: TclJSONArray);
+function TclJsonSerializer.EnumNameToTValue(Name: string; EnumType: PTypeInfo): TValue;
 var
-  i: Integer;
-  listType: TRttiInstanceType;
-  objectList, itemValue: TValue;
-  addMethod: TRttiMethod;
-  itemType: TRttiType;
-  itemClass: TClass;
-begin
-  if (AJsonArray.Count = 0) then Exit;
-
-  listType := AProperty.PropertyType.AsInstance;
-  addMethod := listType.GetMethod('Add');
-
-  if (addMethod = nil) then
-  begin
-    raise EclJsonSerializerError.Create(cObjectListRequired);
-  end;
-
-  itemType := addMethod.GetParameters[0].ParamType;
-  itemClass := itemType.Handle^.TypeData.ClassType;
-
-  objectList := listType.GetMethod('Create').Invoke(listType.MetaclassType, [True]);
-  AProperty.SetValue(AObject, objectList);
-
-  for i := 0 to AJsonArray.Count - 1 do
-  begin
-    if not (AJsonArray.Items[i] is TclJSONObject) then
-    begin
-      raise EclJsonSerializerError.Create(cUnsupportedDataType);
-    end;
-
-    itemValue := Deserialize(itemClass, TclJSONObject(AJsonArray.Items[i]));
-
-    addMethod.Invoke(objectList, [itemValue]);
-  end;
-end;
-
-procedure TclJsonSerializer.DeserializeMap(AProperty: TRttiProperty;
-  AObject: TObject; AJsonObject: TclJSONObject);
-var
-  i: Integer;
-  dictType: TRttiInstanceType;
-  mapName, mapObject,
-  dictionary, dictOwnerships: TValue;
-  addMethod: TRttiMethod;
-  itemType: TRttiType;
-  itemClass: TClass;
-begin
-  if (AJsonObject.Count = 0) then Exit;
-
-  //TODO deserialize non-object types, including dynarrays
-  dictOwnerships := TValue.From<TDictionaryOwnerships>([doOwnsValues]);
-  dictType := AProperty.PropertyType.AsInstance;
-
-  addMethod := dictType.GetMethod('Add');
-
-  if (addMethod = nil) then
-  begin
-    raise EclJsonSerializerError.Create(cDictionaryRequired);
-  end;
-
-  itemType := addMethod.GetParameters[1].ParamType;
-  //TODO deserialize non-object types, including dynarrays
-  itemClass := itemType.Handle^.TypeData.ClassType;
-
-  //TODO deserialize non-object types, including dynarrays
-  dictionary := dictType.GetMethod('Create').Invoke(dictType.MetaclassType, [dictOwnerships, 0]);
-  AProperty.SetValue(AObject, dictionary);
-
-  for i := 0 to AJsonObject.Count - 1 do
-  begin
-    if not (AJsonObject.Members[i].Value is TclJSONObject) then Continue;
-
-    mapName := AJsonObject.Members[i].Name;
-    //TODO deserialize non-object types, including dynarrays
-    mapObject := Deserialize(itemClass, TclJSONObject(AJsonObject.Members[i].Value));
-
-    addMethod.Invoke(dictionary, [mapName, mapObject]);
-  end;
-end;
-
-function TclJsonSerializer.EnumNameToTValue(const Name: string;
-  AProperty: TRttiProperty; EnumType: PTypeInfo): TValue;
-var
-  attr: TCustomAttribute;
-  names: TArray<string>;
-  t: TRttiType;
   V: integer;
 begin
-  if (AProperty.PropertyType is TRttiDynamicArrayType) then
-  begin
-    t := TRttiDynamicArrayType(AProperty.PropertyType).ElementType;
-  end else
-  if (AProperty.PropertyType is TRttiArrayType) then
-  begin
-    t := TRttiArrayType(AProperty.PropertyType).ElementType;
-  end else
-  begin
-    t := AProperty.PropertyType;
-  end;
-
-  for attr in t.GetAttributes() do
-  begin
-    if (attr is TclJsonEnumNamesAttribute) then
-    begin
-      names := TclJsonEnumNamesAttribute(attr).Names;
-      for V := Low(names) to High(names) do
-      begin
-        if (Name = names[V]) then
-        begin
-          TValue.Make(V, EnumType, Result);
-          Exit;
-        end;
-      end;
-    end;
-  end;
-
   V:= GetEnumValue(EnumType, Name);
   TValue.Make(V, EnumType, Result);
-end;
-
-function TclJsonSerializer.EnumTValueToName(AValue: TValue; AProperty: TRttiProperty): string;
-var
-  attr: TCustomAttribute;
-  names: TArray<string>;
-  t: TRttiType;
-begin
-  if (AProperty.PropertyType is TRttiDynamicArrayType) then
-  begin
-    t := TRttiDynamicArrayType(AProperty.PropertyType).ElementType;
-  end else
-  if (AProperty.PropertyType is TRttiArrayType) then
-  begin
-    t := TRttiArrayType(AProperty.PropertyType).ElementType;
-  end else
-  begin
-    t := AProperty.PropertyType;
-  end;
-
-  for attr in t.GetAttributes() do
-  begin
-    if (attr is TclJsonEnumNamesAttribute) then
-    begin
-      names := TclJsonEnumNamesAttribute(attr).Names;
-      if Length(names) > 0 then
-      begin
-        Result := names[AValue.AsOrdinal()];
-      end;
-      Exit;
-    end;
-  end;
-
-  Result := AValue.ToString();
 end;
 
 function TclJsonSerializer.JsonToObject(AObject: TObject; const AJson: string): TObject;
@@ -367,18 +174,6 @@ begin
   obj := TclJSONBase.ParseObject(AJson);
   try
     Result := Deserialize(AObject, obj);
-  finally
-    obj.Free();
-  end;
-end;
-
-function TclJsonSerializer.JsonToObject<T>(const AJson: string): T;
-var
-  obj: TclJSONObject;
-begin
-  obj := TclJSONBase.ParseObject(AJson);
-  try
-    Result := TValue.From(Deserialize(TypeInfo(T), obj)).AsType<T>;
   finally
     obj.Free();
   end;
@@ -432,7 +227,7 @@ begin
     instType := lType.AsInstance;
     rValue := instType.GetMethod('Create').Invoke(instType.MetaclassType, []);
 
-    Result := rValue.AsObject();
+    Result := rValue.AsObject;
     try
       Result := Deserialize(Result, AJson);
     except
@@ -442,6 +237,32 @@ begin
   finally
     ctx.Free();
   end;
+end;
+
+class function TclJsonSerializer.GetDataClass(ATypeInfo: PTypeInfo): TClass;
+  function GetDataType: PTypeData;
+  var
+    pb: PByte;
+  begin
+    pb := @(ATypeInfo^).Name;
+    pb := pb + pb^ + 1;
+    Result := PTypeData(pb);
+  end;
+begin
+  Result := GetDataType().ClassType;
+end;
+
+class function TclJsonSerializer.GetArrayElementType(ATypeInfo: PTypeInfo): PPTypeInfo;
+type
+  PPPTypeInfo = ^PPTypeInfo;
+var
+  td: PTypeData;
+  pb: PByte;
+begin
+  td := GetTypeData(ATypeInfo);
+  pb := @td.DynUnitName;
+  pb := pb + pb^ + 1;
+  Result := PPPTypeInfo(pb)^;
 end;
 
 function TclJsonSerializer.Deserialize(AObject: TObject; const AJson: TclJSONObject): TObject;
@@ -483,19 +304,9 @@ begin
           DeserializeArray(rProp, Result, TclJSONArray(member.Value));
         end else
         if (rProp.PropertyType.TypeKind = tkClass)
-          and (propAttr is TclJsonMapAttribute) then
-        begin
-          DeserializeMap(rProp, Result, TclJSONObject(member.Value));
-        end else
-        if (rProp.PropertyType.TypeKind = tkClass)
-          and (propAttr is TclJsonListAttribute) then
-        begin
-          DeserializeList(rProp, Result, TclJSONArray(member.Value));
-        end else
-        if (rProp.PropertyType.TypeKind = tkClass)
           and (member.Value is TclJSONObject) then
         begin
-          objClass := rProp.PropertyType.Handle^.TypeData.ClassType;
+          objClass := GetDataClass(rProp.PropertyType.Handle);
           rValue := Deserialize(objClass, TclJSONObject(member.Value));
           rProp.SetValue(Result, rValue);
         end else
@@ -525,7 +336,7 @@ begin
           and (rProp.GetValue(Result).TypeInfo.Kind = tkEnumeration)
           and (member.Value is TclJSONValue) then
         begin
-          rValue := EnumNameToTValue(member.ValueString, rProp, rProp.GetValue(Result).TypeInfo);
+          rValue := EnumNameToTValue(member.ValueString, rProp.GetValue(Result).TypeInfo);
           rProp.SetValue(Result, rValue);
         end else
         begin
@@ -564,12 +375,31 @@ begin
   end;
 end;
 
+type
+  TListEx<T> = class(TList<T>)
+  public
+    function ToArray: TArray<T>;
+  end;
+
+{ TListEx<T> }
+
+function TListEx<T>.ToArray: TArray<T>;
+var
+  i: Integer;
+begin
+  SetLength(Result, Count);
+  for i := 0 to Count - 1 do
+  begin
+    Result[i] := Items[i];
+  end;
+end;
+
 procedure TclJsonSerializer.GetTypeAttributes(AType: TRttiType; var ATypeNameAttrs: TclJsonTypeNameMapAttributeList);
 var
   attr: TCustomAttribute;
-  list: TList<TclJsonTypeNameMapAttribute>;
+  list: TListEx<TclJsonTypeNameMapAttribute>;
 begin
-  list := TList<TclJsonTypeNameMapAttribute>.Create();
+  list := TListEx<TclJsonTypeNameMapAttribute>.Create();
   try
     for attr in AType.GetAttributes() do
     begin
@@ -618,16 +448,6 @@ begin
           begin
             SerializeArray(rProp, AObject, TclJsonPropertyAttribute(propAttr), Result);
           end else
-          if (rProp.PropertyType.TypeKind = tkClass)
-            and (propAttr is TclJsonMapAttribute) then
-          begin
-            SerializeMap(rProp, AObject, TclJsonPropertyAttribute(propAttr), Result);
-          end else
-          if (rProp.PropertyType.TypeKind = tkClass)
-            and (propAttr is TclJsonListAttribute) then
-          begin
-            SerializeList(rProp, AObject, TclJsonPropertyAttribute(propAttr), Result);
-          end else
           if (rProp.PropertyType.TypeKind = tkClass) then
           begin
             Result.AddMember(TclJsonPropertyAttribute(propAttr).Name, Serialize(rProp.GetValue(AObject).AsObject()));
@@ -659,8 +479,7 @@ begin
           end else
           if (rProp.PropertyType.TypeKind = tkEnumeration) then
           begin
-            Result.AddValue(TclJsonPropertyAttribute(propAttr).Name,
-              EnumTValueToName(rProp.GetValue(AObject), rProp));
+            Result.AddValue(TclJsonPropertyAttribute(propAttr).Name, rProp.GetValue(AObject).ToString());
           end else
           begin
             raise EclJsonSerializerError.Create(cUnsupportedDataType);
@@ -722,113 +541,12 @@ begin
       end else
       if (rValue.GetArrayElement(i).Kind = tkEnumeration) then
       begin
-        arr.Add(TclJSONValue.Create(
-          EnumTValueToName(rValue.GetArrayElement(i), AProperty)));
+        arr.Add(TclJSONValue.Create(rValue.GetArrayElement(i).ToString()));
       end else
       begin
         raise EclJsonSerializerError.Create(cUnsupportedDataType);
       end;
     end;
-  end;
-end;
-
-procedure TclJsonSerializer.SerializeList(AProperty: TRttiProperty;
-  AObject: TObject; Attribute: TclJsonPropertyAttribute; AJson: TclJsonObject);
-var
-  i, count: Integer;
-  objectList, value: TValue;
-  listType: TRttiType;
-  countProp: TRttiProperty;
-  itemsProp: TRttiIndexedProperty;
-  arr: TclJSONArray;
-begin
-  objectList := AProperty.GetValue(AObject);
-
-  listType := AProperty.PropertyType.AsInstance;
-  countProp := listType.GetProperty('Count');
-  itemsProp := listType.GetIndexedProperty('Items');
-
-  if (countProp = nil) or (itemsProp = nil) then
-  begin
-    raise EclJsonSerializerError.Create(cObjectListRequired);
-  end;
-
-  count := countProp.GetValue(objectList.AsObject()).AsInteger;
-  if (count = 0) then Exit;
-
-  arr := TclJSONArray.Create();
-  AJson.AddMember(Attribute.Name, arr);
-
-  for i := 0 to count - 1 do
-  begin
-    value := itemsProp.GetValue(objectList.AsObject(), [i]);
-    if (value.Kind <> tkClass) then
-    begin
-      raise EclJsonSerializerError.Create(cUnsupportedDataType);
-    end;
-
-    arr.Add(Serialize(value.AsObject()));
-  end;
-end;
-
-procedure TclJsonSerializer.SortMapKeys(var AKeyArray: TValue);
-begin
-  TArray.Sort<string>(AKeyArray.AsType<TArray<string>>());
-end;
-
-procedure TclJsonSerializer.SerializeMap(AProperty: TRttiProperty;
-  AObject: TObject; Attribute: TclJsonPropertyAttribute; AJson: TclJsonObject);
-var
-  dictionary, keys, keyArray, key, value: TValue;
-  dictType, keysType: TRttiType;
-  keysProp: TRttiProperty;
-  itemsProp: TRttiIndexedProperty;
-  toArrayMethod: TRttiMethod;
-  count, i: Integer;
-  map: TclJsonObject;
-begin
-  dictionary := AProperty.GetValue(AObject);
-
-  dictType := AProperty.PropertyType.AsInstance;
-  keysProp := dictType.GetProperty('Keys');
-  itemsProp := dictType.GetIndexedProperty('Items');
-
-  if (keysProp = nil) or (itemsProp = nil) then
-  begin
-    raise EclJsonSerializerError.Create(cDictionaryRequired);
-  end;
-
-  keysType := keysProp.PropertyType.AsInstance;
-  toArrayMethod := keysType.GetMethod('ToArray');
-
-  if (toArrayMethod = nil) then
-  begin
-    raise EclJsonSerializerError.Create(cDictionaryRequired);
-  end;
-
-  keys := keysProp.GetValue(dictionary.AsObject());
-  keyArray := toArrayMethod.Invoke(keys.AsObject(), []);
-
-  count := keyArray.GetArrayLength();
-  if (count = 0) then Exit;
-
-  SortMapKeys(keyArray);
-
-  map := TclJSONObject.Create();
-  AJson.AddMember(Attribute.Name, map);
-
-  for i := 0 to count - 1 do
-  begin
-    if not (keyArray.GetArrayElement(i).Kind in [tkString, tkWString, tkLString, tkUString]) then
-    begin
-      raise EclJsonSerializerError.Create(cUnsupportedDataType);
-    end;
-
-    key := keyArray.GetArrayElement(i);
-    value := itemsProp.GetValue(dictionary.AsObject(), [key]);
-
-    //TODO serialize non-object types, including dynarrays
-    map.AddMember(key.ToString(), Serialize(value.AsObject()));
   end;
 end;
 

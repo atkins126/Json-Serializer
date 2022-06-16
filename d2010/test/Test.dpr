@@ -1,7 +1,7 @@
 program Test;
 
 uses
-  Vcl.Forms,
+  Forms,
   TestFrameWork,
   GUITestRunner,
   clJsonSerializerBase in '..\json\clJsonSerializerBase.pas',
@@ -12,7 +12,6 @@ uses
 {$R *.res}
 
 begin
-  System.ReportMemoryLeaksOnShutdown := True;
   Application.Initialize;
   GUITestRunner.RunRegisteredTests;
 end.
